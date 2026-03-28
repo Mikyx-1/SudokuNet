@@ -3,11 +3,11 @@ train.py — Sudoku solver training script.
 
 Usage
 -----
-# fresh run with tensorboard
+# fresh run
 python train.py
 
-# resume from checkpoint
-python train.py --resume runs/my_run/checkpoints/epoch_010.pt
+# resume from checkpoint (weights only)
+python train.py --resume runs/my_run/best.pt
 
 # with W&B
 python train.py --wandb --run-name experiment_1
@@ -30,7 +30,6 @@ from config import TrainConfig
 from dataset import SudokuDataset
 from model import SudokuSolver
 
-# ── stdlib logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
@@ -39,36 +38,21 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 def masked_accuracy(
-    logits: torch.Tensor,  # (B, 9, 9, 9)
-    target: torch.Tensor,  # (B, 9, 9)
-    mask: torch.Tensor,  # (B, 9, 9) bool
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
 ) -> Tuple[float, float]:
-    """Returns (masked_acc, full_board_acc)."""
-    pred = logits.argmax(dim=1)  # (B, 9, 9)
-    correct = pred == target  # (B, 9, 9)
-
+    pred = logits.argmax(dim=1)
+    correct = pred == target
     masked_acc = (correct & mask).sum().item() / mask.sum().clamp(min=1).item()
-
-    # Full-board accuracy: fraction of boards solved perfectly
     board_correct = correct.view(correct.shape[0], -1).all(dim=1)
     full_acc = board_correct.float().mean().item()
-
     return masked_acc, full_acc
 
 
 def get_lr(optimizer: optim.Optimizer) -> float:
     return optimizer.param_groups[0]["lr"]
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Logger wrapper (TensorBoard / W&B / both)
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 class MetricLogger:
@@ -124,22 +108,15 @@ class MetricLogger:
             self.wandb.finish()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Trainer
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         log.info("Device: %s", self.device)
 
-        # ── Run directory ──────────────────────────────────────────────────────
         run_name = cfg.run_name or f"run_{int(time.time())}"
         self.run_dir = Path(cfg.output_dir) / run_name
-        self.ckpt_dir = self.run_dir / "checkpoints"
-        self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
         cfg.save(str(self.run_dir / "config.json"))
 
         # ── Data ──────────────────────────────────────────────────────────────
@@ -175,6 +152,10 @@ class Trainer:
         n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         log.info("Model parameters: %s", f"{n_params:,}")
 
+        # Load weights if resuming (weights only — training state resets)
+        if cfg.resume_from:
+            self._load_checkpoint(cfg.resume_from)
+
         # ── Optimizer & scheduler ─────────────────────────────────────────────
         self.optimizer = optim.AdamW(
             self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
@@ -194,57 +175,27 @@ class Trainer:
         self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
         self.criterion = nn.CrossEntropyLoss(reduction="none")
 
-        # ── AMP (mixed precision) ─────────────────────────────────────────────
         self.use_amp = self.device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
-        # ── Logger ────────────────────────────────────────────────────────────
         self.logger = MetricLogger(cfg, self.run_dir)
 
-        # ── State ─────────────────────────────────────────────────────────────
-        self.start_epoch = 0
         self.global_step = 0
         self.best_val_loss = float("inf")
 
-        if cfg.resume_from:
-            self._load_checkpoint(cfg.resume_from)
-
     # ── Checkpoint I/O ────────────────────────────────────────────────────────
 
-    def _save_checkpoint(self, epoch: int, tag: str = "") -> Path:
-        name = f"epoch_{epoch:04d}{('_' + tag) if tag else ''}.pt"
-        path = self.ckpt_dir / name
-        torch.save(
-            {
-                "epoch": epoch,
-                "global_step": self.global_step,
-                "model": self.model.state_dict(),
-                "optimizer": self.optimizer.state_dict(),
-                "scheduler": self.scheduler.state_dict(),
-                "scaler": self.scaler.state_dict(),
-                "best_val_loss": self.best_val_loss,
-                "cfg": vars(self.cfg),
-            },
-            path,
-        )
+    def _save_checkpoint(self, filename: str) -> None:
+        """Save model weights only to run_dir/<filename>."""
+        path = self.run_dir / filename
+        torch.save(self.model.state_dict(), path)
         log.info("Checkpoint saved → %s", path)
-        return path
 
     def _load_checkpoint(self, path: str) -> None:
-        ckpt = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(ckpt["model"])
-        self.optimizer.load_state_dict(ckpt["optimizer"])
-        self.scheduler.load_state_dict(ckpt["scheduler"])
-        self.scaler.load_state_dict(ckpt["scaler"])
-        self.start_epoch = ckpt["epoch"] + 1
-        self.global_step = ckpt["global_step"]
-        self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
-        log.info(
-            "Resumed from %s  (epoch %d, step %d)",
-            path,
-            ckpt["epoch"],
-            self.global_step,
-        )
+        """Load model weights only. Optimizer/scheduler start fresh."""
+        state_dict = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(state_dict)
+        log.info("Weights loaded from %s", path)
 
     # ── Training loop ─────────────────────────────────────────────────────────
 
@@ -259,8 +210,8 @@ class Trainer:
             mask = mask.to(self.device, non_blocking=True)
 
             with torch.amp.autocast("cuda", enabled=self.use_amp):
-                logits = self.model(inp)  # (B, 9, 9, 9)
-                loss_map = self.criterion(logits, target)  # (B, 9, 9)
+                logits = self.model(inp)
+                loss_map = self.criterion(logits, target)
                 loss = loss_map[mask].mean() if mask.any() else loss_map.mean()
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -326,13 +277,12 @@ class Trainer:
 
     def train(self) -> None:
         log.info(
-            "Starting training — epochs %d→%d, %d steps/epoch",
-            self.start_epoch + 1,
+            "Starting training — %d epochs, %d steps/epoch",
             self.cfg.num_epochs,
             len(self.train_loader),
         )
 
-        for epoch in range(self.start_epoch, self.cfg.num_epochs):
+        for epoch in range(self.cfg.num_epochs):
             train_stats = self._train_epoch(epoch)
 
             log.info(
@@ -368,27 +318,21 @@ class Trainer:
 
                 if val_stats["loss"] < self.best_val_loss:
                     self.best_val_loss = val_stats["loss"]
-                    self._save_checkpoint(epoch, tag="best")
+                    self._save_checkpoint("best.pt")
                     log.info("  ↳ New best val loss: %.4f", self.best_val_loss)
 
-            # ── Periodic checkpoint ───────────────────────────────────────────
-            if (epoch + 1) % self.cfg.save_every == 0:
-                self._save_checkpoint(epoch)
+            # Save last.pt at the end of each iteration
+            self._save_checkpoint("last.pt")
 
-        # Always save at the end
-        self._save_checkpoint(self.cfg.num_epochs - 1, tag="final")
         self.logger.close()
         log.info("Training complete. Best val loss: %.4f", self.best_val_loss)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train Sudoku Solver")
-    p.add_argument("--resume", metavar="PATH", help="Resume from checkpoint")
+    p.add_argument(
+        "--resume", metavar="PATH", help="Resume from checkpoint (weights only)"
+    )
     p.add_argument("--run-name", metavar="NAME", help="Name for this run")
     p.add_argument("--wandb", action="store_true", help="Enable W&B logging")
     p.add_argument("--no-tb", action="store_true", help="Disable TensorBoard")
@@ -400,10 +344,8 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-
     cfg = TrainConfig()
 
-    # CLI overrides
     if args.resume:
         cfg.resume_from = args.resume
     if args.run_name:
