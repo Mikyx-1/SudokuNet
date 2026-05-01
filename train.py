@@ -16,10 +16,9 @@ python train.py --wandb --run-name experiment_1
 import argparse
 import logging
 import math
-import os
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -57,23 +56,6 @@ def get_lr(optimizer: optim.Optimizer) -> float:
 
 class MetricLogger:
     def __init__(self, cfg: TrainConfig, run_dir: Path):
-        self.writers = []
-
-        if cfg.use_tensorboard:
-            try:
-                from torch.utils.tensorboard import SummaryWriter
-
-                tb_dir = run_dir / "tensorboard"
-                tb_dir.mkdir(parents=True, exist_ok=True)
-                self.tb = SummaryWriter(log_dir=str(tb_dir))
-                self.writers.append("tensorboard")
-                log.info("TensorBoard logging → %s", tb_dir)
-            except ImportError:
-                log.warning("tensorboard not installed — skipping TB logging")
-                self.tb = None
-        else:
-            self.tb = None
-
         if cfg.use_wandb:
             try:
                 import wandb
@@ -86,7 +68,6 @@ class MetricLogger:
                     resume="allow",
                 )
                 self.wandb = wandb
-                self.writers.append("wandb")
                 log.info("W&B run: %s", wandb.run.url)
             except ImportError:
                 log.warning("wandb not installed — skipping W&B logging")
@@ -95,15 +76,10 @@ class MetricLogger:
             self.wandb = None
 
     def log(self, metrics: Dict[str, float], step: int) -> None:
-        if self.tb:
-            for k, v in metrics.items():
-                self.tb.add_scalar(k, v, step)
         if self.wandb:
             self.wandb.log(metrics, step=step)
 
     def close(self) -> None:
-        if self.tb:
-            self.tb.close()
         if self.wandb:
             self.wandb.finish()
 
@@ -335,7 +311,6 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--run-name", metavar="NAME", help="Name for this run")
     p.add_argument("--wandb", action="store_true", help="Enable W&B logging")
-    p.add_argument("--no-tb", action="store_true", help="Disable TensorBoard")
     p.add_argument("--epochs", type=int, help="Override num_epochs")
     p.add_argument("--batch-size", type=int, help="Override batch_size")
     p.add_argument("--lr", type=float, help="Override learning rate")
@@ -352,8 +327,6 @@ if __name__ == "__main__":
         cfg.run_name = args.run_name
     if args.wandb:
         cfg.use_wandb = True
-    if args.no_tb:
-        cfg.use_tensorboard = False
     if args.epochs:
         cfg.num_epochs = args.epochs
     if args.batch_size:
