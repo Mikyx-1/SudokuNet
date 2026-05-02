@@ -4,8 +4,8 @@ config.py — Training configuration loaded from a YAML file.
 
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -38,13 +38,17 @@ class TrainConfig:
     warmup_epochs: int = 5
     lr_min: float = 1e-6
 
-    # ── Logging / Checkpointing ────────────────────────────────────────────────
+    # ── Logging ───────────────────────────────────────────────────────────────
     log_every: int = 10
     eval_every: int = 1
     save_every: int = 5
-    run_name: Optional[str] = None
     output_dir: str = "runs"
+
+    # ── W&B ───────────────────────────────────────────────────────────────────
     use_wandb: bool = False
+    project: str = "sudoku-solver"
+    group: str = "sudoku_cnn"
+    run_name: Optional[str] = None  # auto-generated if null
 
     # ── Resume ────────────────────────────────────────────────────────────────
     resume_from: Optional[str] = None
@@ -53,7 +57,8 @@ class TrainConfig:
 
     def __post_init__(self) -> None:
         if self.run_name is None:
-            self.run_name = f"run_{int(time.time())}"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.run_name = f"{self.group}_{timestamp}"
 
     # ── Serialisation ─────────────────────────────────────────────────────────
 
@@ -62,13 +67,11 @@ class TrainConfig:
         """Load config from a nested YAML file, ignoring unknown keys."""
         with open(path) as f:
             data = yaml.safe_load(f) or {}
-        # Flatten nested sections (e.g. data.num_samples → num_samples)
+        # Flatten nested sections (e.g. data.num_samples -> num_samples)
         flat: dict = {}
         for value in data.values():
             if isinstance(value, dict):
                 flat.update(value)
-            else:
-                flat[value] = value  # top-level scalar, unlikely but safe
         valid_fields = cls.__dataclass_fields__.keys()
         filtered = {k: v for k, v in flat.items() if k in valid_fields}
         return cls(**filtered)
@@ -93,6 +96,5 @@ class TrainConfig:
             val = getattr(args, arg_attr, None)
             if val is not None:
                 setattr(self, cfg_attr, val)
-        # store_true flags: False means "not passed", not "set to False"
         if getattr(args, "wandb", False):
             self.use_wandb = True

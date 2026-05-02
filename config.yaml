@@ -28,9 +28,13 @@ logging:
   log_every: 10     # steps between scalar logs
   eval_every: 1     # epochs between evaluations
   save_every: 5     # epochs between checkpoints
-  run_name: null    # auto-generated if null
   output_dir: runs
-  use_wandb: false
+
+wandb:
+  use_wandb: true
+  project: "sudoku-solver"
+  group: sudoku_cnn
+  run_name: null    # auto-generates to "{group}_{timestamp}" e.g. "sudoku_cnn_20250502_143022"
 
 resume:
   resume_from: null # path to a checkpoint .pt file

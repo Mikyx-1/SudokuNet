@@ -5,6 +5,7 @@ logger.py — W&B metric logger.
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from pathlib import Path
 from typing import Dict
 
@@ -24,9 +25,10 @@ class MetricLogger:
             import wandb
 
             wandb.init(
-                project="sudoku-solver",
+                project=cfg.project,
+                group=cfg.group,
                 name=cfg.run_name,
-                config=cfg.to_dict(),
+                config=asdict(cfg),
                 dir=str(run_dir),
                 resume="allow",
             )
