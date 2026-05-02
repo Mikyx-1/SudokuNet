@@ -211,5 +211,5 @@ __marimo__/
 *.pt
 *.pth
 
-# Artifacts + training logs
+# Artefacts + training logs
 runs/
