@@ -210,3 +210,6 @@ __marimo__/
 # Pytorch weights
 *.pt
 *.pth
+
+# Artifacts + training logs
+runs/
