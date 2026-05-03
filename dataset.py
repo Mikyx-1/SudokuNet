@@ -150,7 +150,7 @@ class SudokuDataset(Dataset):
         n = random.randint(self.min_mask, min(self.max_mask, 81))
         flat = masked.ravel()
         flat_mask = mask.ravel()
-        for k in indices[:n]:
-            flat[k] = 9  # sentinel for "unknown"
-            flat_mask[k] = True
+        selected = indices[:n]
+        flat[selected] = 9
+        flat_mask[selected] = True
         return masked, mask
