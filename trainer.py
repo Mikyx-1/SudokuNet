@@ -68,7 +68,7 @@ class Trainer:
             persistent_workers=cfg.num_workers > 0,
         )
         self.train_loader = DataLoader(
-            train_ds, batch_size=cfg.batch_size, shuffle=False, **loader_kwargs
+            train_ds, batch_size=cfg.batch_size, shuffle=True, **loader_kwargs
         )
         self.val_loader = DataLoader(
             val_ds, batch_size=cfg.batch_size * 2, **loader_kwargs
