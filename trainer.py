@@ -23,6 +23,10 @@ from model import SudokuSolver
 
 log = logging.getLogger(__name__)
 
+# Since Sudoku is fixed-size (9x9), we can benefit
+# from cuDNNoptimisations by enabling benchmark mode.
+torch.backends.cudnn.benchmark = True
+
 
 def _get_lr(optimizer: optim.Optimizer) -> float:
     return optimizer.param_groups[0]["lr"]
@@ -89,7 +93,10 @@ class Trainer:
     def _build_optimiser(self) -> None:
         cfg = self.cfg
         self.optimizer = optim.AdamW(
-            self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+            self.model.parameters(),
+            lr=cfg.lr,
+            weight_decay=cfg.weight_decay,
+            fused=True,
         )
 
         total_steps = cfg.num_epochs * len(self.train_loader)
