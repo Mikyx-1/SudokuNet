@@ -3,42 +3,90 @@ from typing import Tuple
 
 import numpy as np
 import torch
+from numba import njit
 from torch.utils.data import Dataset
 
 
-class Sudoku:
-    @staticmethod
-    def is_valid(board: np.ndarray, row: int, col: int, num: int) -> bool:
-        if num in board[row, :]:
-            return False
-        if num in board[:, col]:
-            return False
-        sr, sc = row - row % 3, col - col % 3
-        if num in board[sr : sr + 3, sc : sc + 3]:
-            return False
+@njit(cache=True)
+def _solve_mrv(board, rows, cols, boxes):
+    VALID_BITS = 0b1111111110
+
+    best_pos = -1
+    best_count = 10
+    best_free = 0
+
+    for r in range(9):
+        for c in range(9):
+            if board[r, c] == 0:
+                used = rows[r] | cols[c] | boxes[(r // 3) * 3 + c // 3]
+                free = VALID_BITS & ~used
+
+                tmp = free
+                count = 0
+                while tmp:
+                    tmp &= tmp - 1
+                    count += 1
+                if count == 0:
+                    return False
+                if count < best_count:
+                    best_count = count
+                    best_pos = r * 9 + c
+                    best_free = free
+        if best_count == 1:
+            break
+
+    if best_pos == -1:
         return True
 
-    @staticmethod
-    def solve_board_backtracking(board: np.ndarray) -> bool:
-        for row in range(9):
-            for col in range(9):
-                if board[row, col] == 0:
-                    nums = list(range(1, 10))
-                    random.shuffle(nums)
-                    for num in nums:
-                        if Sudoku.is_valid(board, row, col, num):
-                            board[row, col] = num
-                            if Sudoku.solve_board_backtracking(board):
-                                return True
-                            board[row, col] = 0
-                    return False
-        return True
+    r, c = best_pos // 9, best_pos % 9
+    b = (r // 3) * 3 + c // 3
+
+    # Collect candidates into a fixed-size array
+    candidates = np.empty(9, dtype=np.int64)
+    n_candidates = 0
+    free = best_free
+    while free:
+        bit = free & (-free)
+        free &= free - 1
+        candidates[n_candidates] = bit
+        n_candidates += 1
+
+    # Fisher-Yates shuffle for randomness
+    for i in range(n_candidates - 1, 0, -1):
+        j = np.random.randint(0, i + 1)
+        candidates[i], candidates[j] = candidates[j], candidates[i]
+
+    for k in range(n_candidates):
+        bit = candidates[k]
+        num = 0
+        tmp = bit
+        while tmp > 1:
+            tmp >>= 1
+            num += 1
+
+        board[r, c] = num
+        rows[r] |= bit
+        cols[c] |= bit
+        boxes[b] |= bit
+
+        if _solve_mrv(board, rows, cols, boxes):
+            return True
+
+        board[r, c] = 0
+        rows[r] ^= bit
+        cols[c] ^= bit
+        boxes[b] ^= bit
+
+    return False
+
+
+class Sudoku:
 
     @staticmethod
     def solve_board_mrv(board: np.ndarray) -> bool:
-        rows = [0] * 9
-        cols = [0] * 9
-        boxes = [0] * 9
+        rows = np.zeros(9, dtype=np.int64)
+        cols = np.zeros(9, dtype=np.int64)
+        boxes = np.zeros(9, dtype=np.int64)
 
         for r in range(9):
             for c in range(9):
@@ -49,71 +97,17 @@ class Sudoku:
                     cols[c] |= mask
                     boxes[(r // 3) * 3 + c // 3] |= mask
 
-        VALID_BITS = 0b1111111110  # bits 1-9 only, bit 0 excluded
-
-        def solve() -> bool:
-            best_pos = -1
-            best_count = 10
-            best_free = 0
-
-            for r in range(9):
-                for c in range(9):
-                    if board[r, c] == 0:
-                        used = rows[r] | cols[c] | boxes[(r // 3) * 3 + c // 3]
-                        free = VALID_BITS & ~used  # only bits 1-9
-                        count = bin(free).count("1")
-                        if count == 0:
-                            return False
-                        if count < best_count:
-                            best_count = count
-                            best_pos = r * 9 + c
-                            best_free = free
-                            if count == 1:
-                                break
-                if best_count == 1:
-                    break
-
-            if best_pos == -1:
-                return True
-
-            r, c = divmod(best_pos, 9)
-            b = (r // 3) * 3 + c // 3
-
-            # Collect all candidate bits
-            candidates = []
-            free = best_free
-            while free:
-                bit = free & -free
-                free &= free - 1
-                candidates.append(bit)
-
-            # Shuffle to introduce randomness
-            random.shuffle(candidates)
-
-            # Try candidates in random order
-            for bit in candidates:
-                num = bit.bit_length() - 1  # still 1–9
-
-                board[r, c] = num
-                rows[r] |= bit
-                cols[c] |= bit
-                boxes[b] |= bit
-
-                if solve():
-                    return True
-
-                board[r, c] = 0
-                rows[r] ^= bit
-                cols[c] ^= bit
-                boxes[b] ^= bit
-
-            return False
-
-        return solve()
+        return _solve_mrv(board, rows, cols, boxes)
 
     @staticmethod
     def generate_solved_board() -> np.ndarray:
         board = np.zeros((9, 9), dtype=np.int64)
+        # Seed diagonal boxes for randomness without needing shuffle in the solver
+        for box in range(3):
+            nums = np.random.permutation(np.arange(1, 10, dtype=np.int64))
+            for i in range(3):
+                for j in range(3):
+                    board[box * 3 + i, box * 3 + j] = nums[i * 3 + j]
         Sudoku.solve_board_mrv(board)
         return board
 
