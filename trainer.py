@@ -46,7 +46,7 @@ class Trainer:
         self._build_model()
         self._build_optimiser()
 
-        self.criterion = nn.CrossEntropyLoss(reduction="none")
+        self.criterion = nn.CrossEntropyLoss(reduction="none", label_smoothing=cfg.label_smoothing)
         self.use_amp = self.device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
         self.logger = MetricLogger(cfg, self.run_dir)
