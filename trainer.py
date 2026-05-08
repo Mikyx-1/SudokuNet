@@ -124,10 +124,10 @@ class Trainer:
         log.info("Weights loaded from %s", path)
 
     # ── Train / val epochs ────────────────────────────────────────────────────
-
     def _train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
         total_loss = total_masked_acc = total_full_acc = 0.0
+        skipped = 0
         t0 = time.perf_counter()
 
         for inp, target, mask in self.train_loader:
@@ -140,10 +140,37 @@ class Trainer:
                 loss_map = self.criterion(logits, target)
                 loss = loss_map[mask].mean() if mask.any() else loss_map.mean()
 
+            # ── Guard 1: catch NaN/Inf loss before backward poisons gradients ──
+            if not torch.isfinite(loss):
+                log.warning(
+                    "Non-finite loss at step %d — skipping batch", self.global_step
+                )
+                self.global_step += 1
+                self.scheduler.step()
+                skipped += 1
+                continue
+
             self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
+
+            # ── Guard 2: catch exploded gradients before they corrupt weights ──
+            total_norm = nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.cfg.grad_clip
+            )
+            if not torch.isfinite(total_norm):
+                log.warning(
+                    "Non-finite grad norm (%.2e) at step %d — skipping update",
+                    total_norm,
+                    self.global_step,
+                )
+                self.optimizer.zero_grad(set_to_none=True)
+                self.scaler.update()
+                self.global_step += 1
+                self.scheduler.step()
+                skipped += 1
+                continue
+
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.scheduler.step()
@@ -166,10 +193,15 @@ class Trainer:
                 )
 
         n = len(self.train_loader)
+        good = n - skipped
+        if skipped:
+            log.warning(
+                "Epoch %d: skipped %d/%d batches due to NaN", epoch + 1, skipped, n
+            )
         return {
-            "loss": total_loss / n,
-            "masked_acc": total_masked_acc / n,
-            "full_acc": total_full_acc / n,
+            "loss": total_loss / max(good, 1),
+            "masked_acc": total_masked_acc / max(good, 1),
+            "full_acc": total_full_acc / max(good, 1),
             "epoch_time": time.perf_counter() - t0,
         }
 
