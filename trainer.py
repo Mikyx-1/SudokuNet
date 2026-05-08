@@ -76,12 +76,21 @@ class Trainer:
 
     def _build_model(self) -> None:
         cfg = self.cfg
+        # self.model = SudokuSolver(
+        #     embed_dim=cfg.embed_dim,
+        #     channels=cfg.channels,
+        #     num_res_blocks=cfg.num_res_blocks,
+        #     num_heads=cfg.num_heads,
+        #     dropout_rate=cfg.dropout_rate,
+        # ).to(self.device)
+
         self.model = SudokuSolver(
-            embed_dim=cfg.embed_dim,
-            channels=cfg.channels,
-            num_res_blocks=cfg.num_res_blocks,
-            num_heads=cfg.num_heads,
-            dropout_rate=cfg.dropout_rate,
+            embed_dim=64,
+            channels=256,
+            num_res_blocks=4,
+            num_transformer_blocks=8,
+            num_heads=8,
+            dropout_rate=0.1,
         ).to(self.device)
 
         n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
