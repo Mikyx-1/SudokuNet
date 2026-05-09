@@ -91,12 +91,17 @@ if __name__ == "__main__":
 
     gpus = None
     if args.gpus is not None:
-        gpus = [int(g.strip()) for g in args.gpus.split(",")]
+        requested = [int(g.strip()) for g in args.gpus.split(",")]
+        # Set CUDA_VISIBLE_DEVICES before any CUDA API call so the runtime never
+        # creates a primary context on GPU 0 when we aren't using it.
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in requested)
+        # CUDA remaps the visible GPUs to 0-indexed, so [1,2,3] becomes [0,1,2].
+        gpus = list(range(len(requested)))
         available = torch.cuda.device_count()
-        bad = [g for g in gpus if g >= available]
-        if bad:
+        if available < len(gpus):
             raise SystemExit(
-                f"GPU(s) {bad} not available — {available} GPU(s) detected."
+                f"{len(gpus)} GPU(s) requested but only {available} visible "
+                f"(CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']})."
             )
 
     if gpus and len(gpus) > 1:
