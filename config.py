@@ -33,6 +33,8 @@ class TrainConfig:
     weight_decay: float = 1e-4
     num_epochs: int = 200
     grad_clip: float = 1.0
+    label_smoothing: float = 0.1
+    use_amp: bool = False
 
     # ── LR Schedule ───────────────────────────────────────────────────────────
     warmup_epochs: int = 5
