@@ -20,6 +20,7 @@ training:
   num_epochs: 200
   grad_clip: 1.0
   label_smoothing: 0.1
+  use_amp: true
 
 schedule:
   warmup_epochs: 5
