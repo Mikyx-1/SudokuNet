@@ -17,9 +17,9 @@ log = logging.getLogger(__name__)
 class MetricLogger:
     """Thin wrapper around W&B (optional)."""
 
-    def __init__(self, cfg: TrainConfig, run_dir: Path) -> None:
+    def __init__(self, cfg: TrainConfig, run_dir: Path, is_main: bool = True) -> None:
         self.wandb = None
-        if not cfg.use_wandb:
+        if not cfg.use_wandb or not is_main:
             return
         try:
             import wandb

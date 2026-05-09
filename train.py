@@ -3,21 +3,32 @@ train.py — Entry point for training the Sudoku solver.
 
 Usage
 -----
-# fresh run with defaults
+# Auto-select device (GPU 0 if available, else CPU)
 python train.py
 
-# custom config file
-python train.py --config my_config.yaml
+# Pin a single GPU
+python train.py --gpus 1
 
-# resume from checkpoint (weights only)
-python train.py --resume runs/my_run/best.pt
+# Multi-GPU DDP on GPUs 0, 1, 2
+python train.py --gpus 0,1,2
 
-# CLI overrides (applied on top of the config file)
-python train.py --config my_config.yaml --epochs 50 --lr 5e-4 --wandb
+# With other overrides
+python train.py --gpus 0,1 --epochs 300 --lr 5e-4 --wandb
+
+# Resume from checkpoint
+python train.py --gpus 0,1 --resume runs/my_run/best.pt
 """
 
 import argparse
 import logging
+import os
+import signal
+import socket
+from datetime import timedelta
+
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from config import TrainConfig
 from trainer import Trainer
@@ -29,6 +40,38 @@ logging.basicConfig(
 )
 
 
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _terminate_workers(processes: list) -> None:
+    for p in processes:
+        if p.is_alive():
+            p.terminate()
+    for p in processes:
+        p.join(timeout=5)
+        if p.is_alive():
+            p.kill()
+
+
+def _ddp_worker(rank: int, cfg: TrainConfig, gpus: list) -> None:
+    # SIGTERM (sent by _terminate_workers) must raise SystemExit so the
+    # finally block below runs and dist.destroy_process_group() is called.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(0)))
+    torch.cuda.set_device(gpus[rank])
+    dist.init_process_group(
+        "nccl", rank=rank, world_size=len(gpus), timeout=timedelta(seconds=60)
+    )
+    if rank != 0:
+        logging.disable(logging.CRITICAL)
+    try:
+        Trainer(cfg, rank=rank, world_size=len(gpus), gpus=gpus).train()
+    finally:
+        dist.destroy_process_group()
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train Sudoku Solver")
     p.add_argument(
@@ -36,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         default="config.yaml",
         help="Path to YAML config file (default: config.yaml)",
+    )
+    p.add_argument(
+        "--gpus",
+        metavar="IDS",
+        default=None,
+        help="Comma-separated GPU indices, e.g. '0' or '0,1,2'. Omit to auto-select.",
     )
     p.add_argument(
         "--resume", metavar="PATH", help="Resume from checkpoint (weights only)"
@@ -57,4 +106,35 @@ if __name__ == "__main__":
     cfg = TrainConfig.from_yaml(args.config)
     cfg.merge_args(args)
 
-    Trainer(cfg).train()
+    gpus = None
+    if args.gpus is not None:
+        requested = [int(g.strip()) for g in args.gpus.split(",")]
+        # Set CUDA_VISIBLE_DEVICES before any CUDA API call so the runtime never
+        # creates a primary context on GPU 0 when we aren't using it.
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in requested)
+        # CUDA remaps the visible GPUs to 0-indexed, so [1,2,3] becomes [0,1,2].
+        gpus = list(range(len(requested)))
+        available = torch.cuda.device_count()
+        if available < len(gpus):
+            raise SystemExit(
+                f"{len(gpus)} GPU(s) requested but only {available} visible "
+                f"(CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']})."
+            )
+
+    if gpus and len(gpus) > 1:
+        os.environ.setdefault("MASTER_ADDR", "localhost")
+        os.environ.setdefault("MASTER_PORT", str(_find_free_port()))
+        ctx = mp.spawn(_ddp_worker, args=(cfg, gpus), nprocs=len(gpus), join=False)
+        try:
+            ctx.join()
+        except KeyboardInterrupt:
+            logging.getLogger(__name__).info("Interrupted — shutting down workers …")
+            _terminate_workers(ctx.processes)
+            raise SystemExit(130)
+        except Exception:
+            _terminate_workers(ctx.processes)
+            raise
+    else:
+        if gpus:
+            torch.cuda.set_device(gpus[0])
+        Trainer(cfg, gpus=gpus).train()
