@@ -21,28 +21,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _build_axis_masks(device: torch.device):
-    """
-    Pre-compute boolean masks for the three Sudoku constraint axes.
-
-    Returns three (81, 81) bool tensors where True means cell i and cell j
-    share the same row / column / 3×3 box (including i==j).
-    """
-    cells = torch.arange(81)
-    rows = cells // 9  # 0-8
-    cols = cells % 9  # 0-8
-    boxes = (rows // 3) * 3 + cols // 3  # 0-8
-
-    row_mask = rows.unsqueeze(1) == rows.unsqueeze(0)  # (81,81)
-    col_mask = cols.unsqueeze(1) == cols.unsqueeze(0)
-    box_mask = boxes.unsqueeze(1) == boxes.unsqueeze(0)
-    return row_mask.to(device), col_mask.to(device), box_mask.to(device)
-
 
 class AxisAttention(nn.Module):
     """
