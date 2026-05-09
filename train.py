@@ -22,7 +22,9 @@ python train.py --gpus 0,1 --resume runs/my_run/best.pt
 import argparse
 import logging
 import os
+import signal
 import socket
+from datetime import timedelta
 
 import torch
 import torch.distributed as dist
@@ -44,9 +46,24 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _terminate_workers(processes: list) -> None:
+    for p in processes:
+        if p.is_alive():
+            p.terminate()
+    for p in processes:
+        p.join(timeout=5)
+        if p.is_alive():
+            p.kill()
+
+
 def _ddp_worker(rank: int, cfg: TrainConfig, gpus: list) -> None:
+    # SIGTERM (sent by _terminate_workers) must raise SystemExit so the
+    # finally block below runs and dist.destroy_process_group() is called.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(0)))
     torch.cuda.set_device(gpus[rank])
-    dist.init_process_group("nccl", rank=rank, world_size=len(gpus))
+    dist.init_process_group(
+        "nccl", rank=rank, world_size=len(gpus), timeout=timedelta(seconds=60)
+    )
     if rank != 0:
         logging.disable(logging.CRITICAL)
     try:
@@ -107,7 +124,16 @@ if __name__ == "__main__":
     if gpus and len(gpus) > 1:
         os.environ.setdefault("MASTER_ADDR", "localhost")
         os.environ.setdefault("MASTER_PORT", str(_find_free_port()))
-        mp.spawn(_ddp_worker, args=(cfg, gpus), nprocs=len(gpus), join=True)
+        ctx = mp.spawn(_ddp_worker, args=(cfg, gpus), nprocs=len(gpus), join=False)
+        try:
+            ctx.join()
+        except KeyboardInterrupt:
+            logging.getLogger(__name__).info("Interrupted — shutting down workers …")
+            _terminate_workers(ctx.processes)
+            raise SystemExit(130)
+        except Exception:
+            _terminate_workers(ctx.processes)
+            raise
     else:
         if gpus:
             torch.cuda.set_device(gpus[0])
