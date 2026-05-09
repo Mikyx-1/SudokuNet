@@ -3,21 +3,30 @@ train.py — Entry point for training the Sudoku solver.
 
 Usage
 -----
-# fresh run with defaults
+# Auto-select device (GPU 0 if available, else CPU)
 python train.py
 
-# custom config file
-python train.py --config my_config.yaml
+# Pin a single GPU
+python train.py --gpus 1
 
-# resume from checkpoint (weights only)
-python train.py --resume runs/my_run/best.pt
+# Multi-GPU DDP on GPUs 0, 1, 2
+python train.py --gpus 0,1,2
 
-# CLI overrides (applied on top of the config file)
-python train.py --config my_config.yaml --epochs 50 --lr 5e-4 --wandb
+# With other overrides
+python train.py --gpus 0,1 --epochs 300 --lr 5e-4 --wandb
+
+# Resume from checkpoint
+python train.py --gpus 0,1 --resume runs/my_run/best.pt
 """
 
 import argparse
 import logging
+import os
+import socket
+
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from config import TrainConfig
 from trainer import Trainer
@@ -29,6 +38,23 @@ logging.basicConfig(
 )
 
 
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _ddp_worker(rank: int, cfg: TrainConfig, gpus: list) -> None:
+    torch.cuda.set_device(gpus[rank])
+    dist.init_process_group("nccl", rank=rank, world_size=len(gpus))
+    if rank != 0:
+        logging.disable(logging.CRITICAL)
+    try:
+        Trainer(cfg, rank=rank, world_size=len(gpus), gpus=gpus).train()
+    finally:
+        dist.destroy_process_group()
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train Sudoku Solver")
     p.add_argument(
@@ -36,6 +62,12 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         default="config.yaml",
         help="Path to YAML config file (default: config.yaml)",
+    )
+    p.add_argument(
+        "--gpus",
+        metavar="IDS",
+        default=None,
+        help="Comma-separated GPU indices, e.g. '0' or '0,1,2'. Omit to auto-select.",
     )
     p.add_argument(
         "--resume", metavar="PATH", help="Resume from checkpoint (weights only)"
@@ -57,4 +89,21 @@ if __name__ == "__main__":
     cfg = TrainConfig.from_yaml(args.config)
     cfg.merge_args(args)
 
-    Trainer(cfg).train()
+    gpus = None
+    if args.gpus is not None:
+        gpus = [int(g.strip()) for g in args.gpus.split(",")]
+        available = torch.cuda.device_count()
+        bad = [g for g in gpus if g >= available]
+        if bad:
+            raise SystemExit(
+                f"GPU(s) {bad} not available — {available} GPU(s) detected."
+            )
+
+    if gpus and len(gpus) > 1:
+        os.environ.setdefault("MASTER_ADDR", "localhost")
+        os.environ.setdefault("MASTER_PORT", str(_find_free_port()))
+        mp.spawn(_ddp_worker, args=(cfg, gpus), nprocs=len(gpus), join=True)
+    else:
+        if gpus:
+            torch.cuda.set_device(gpus[0])
+        Trainer(cfg, gpus=gpus).train()
