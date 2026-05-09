@@ -1,86 +1,164 @@
 """
-inference.py — evaluate a trained checkpoint on fresh puzzles.
-
-Usage
------
-python inference.py --checkpoint runs/my_run/checkpoints/epoch_0010_best.pt
-python inference.py --checkpoint runs/my_run/checkpoints/epoch_0010_best.pt --samples 50
+test.py — Load a trained SudokuSolver and run inference on sample puzzles.
 """
 
 import argparse
-from pathlib import Path
 
+import numpy as np
 import torch
 
-from config import TrainConfig
-from dataset import SudokuDataset
+from dataset import Sudoku
 from model import SudokuSolver
 
 
-def load_model(ckpt_path: str, device: torch.device) -> SudokuSolver:
-    ckpt = torch.load(ckpt_path, map_location=device)
-    cfg_dict = ckpt.get("cfg", {})
+def load_model(path: str, device: torch.device) -> SudokuSolver:
     model = SudokuSolver(
-        embed_dim=cfg_dict.get("embed_dim", 64),
-        channels=cfg_dict.get("channels", 256),
-        num_res_blocks=cfg_dict.get("num_res_blocks", 8),
-        num_heads=cfg_dict.get("num_heads", 8),
-        dropout_rate=0.0,  # no dropout at inference
-    )
-    model.load_state_dict(ckpt["model"])
-    model.to(device).eval()
+        embed_dim=64,
+        channels=256,
+        num_res_blocks=4,
+        num_transformer_blocks=8,
+        num_heads=8,
+        dropout_rate=0.1,
+    ).to(device)
+    state = torch.load(path, map_location=device)
+    model.load_state_dict(state)
+    model.eval()
     return model
 
 
+def make_puzzle(num_clues: int):
+    """Return (puzzle, solution) as (9,9) numpy arrays with 0-indexed values (0–8)."""
+    solved = Sudoku.generate_solved_board() - 1  # 0-indexed
+    puzzle = solved.copy()
+    masked_indices = np.random.permutation(81)[: 81 - num_clues]
+    puzzle.ravel()[masked_indices] = 9  # 9 = unknown token
+    return puzzle, solved
+
+
+def print_board(board: np.ndarray, title: str = "") -> None:
+    digits = np.where(board == 9, 0, board + 1)  # back to 1-indexed, 0 = blank
+    if title:
+        print(title)
+    for r in range(9):
+        row = ""
+        for c in range(9):
+            row += (str(digits[r, c]) if digits[r, c] else ".") + " "
+            if c in (2, 5):
+                row += "| "
+        print(row)
+        if r in (2, 5):
+            print("-" * 21)
+    print()
+
+
+def is_valid_solution(pred: np.ndarray) -> bool:
+    digits = pred + 1  # 1-indexed
+    target = set(range(1, 10))
+    for i in range(9):
+        if set(digits[i, :]) != target:
+            return False
+        if set(digits[:, i]) != target:
+            return False
+        box = digits[i // 3 * 3 : i // 3 * 3 + 3, (i % 3) * 3 : (i % 3) * 3 + 3]
+        if set(box.ravel()) != target:
+            return False
+    return True
+
+
 @torch.no_grad()
-def evaluate(model: SudokuSolver, dataset: SudokuDataset, device: torch.device):
-    total_masked = total_masked_correct = total_boards = total_boards_correct = 0
+def solve(model: SudokuSolver, puzzle: np.ndarray, device: torch.device) -> np.ndarray:
+    inp = torch.from_numpy(puzzle).long().unsqueeze(0).to(device)  # (1, 9, 9)
+    logits = model(inp)  # (1, 9, 9, 9)
+    pred = logits.argmax(dim=1).squeeze(0).cpu().numpy()  # (9, 9)
+    # Keep given clues as-is, fill only masked cells
+    out = puzzle.copy()
+    out[puzzle == 9] = pred[puzzle == 9]
+    return out
 
-    for i in range(len(dataset)):
-        inp, target, mask = dataset[i]
-        inp = inp.unsqueeze(0).to(device)
-        target = target.to(device)
-        mask = mask.to(device)
 
-        logits = model(inp).squeeze(0)  # (9, 9, 9) — remove batch dim
-        pred = logits.argmax(dim=0)  # (9, 9)
+@torch.no_grad()
+def solve_iterative(
+    model: SudokuSolver, puzzle: np.ndarray, device: torch.device
+) -> np.ndarray:
+    """
+    Iterative inference: each step fix only the single most-confident masked
+    cell, then re-run the model with that cell now revealed. Repeat until all
+    cells are filled or the model stops making progress.
+    """
+    board = puzzle.copy()
 
-        correct = pred == target
-        masked_correct = (correct & mask).sum().item()
-        n_masked = mask.sum().item()
+    while True:
+        masked = np.argwhere(board == 9)  # remaining unknown cells
+        if len(masked) == 0:
+            break
 
-        total_masked += n_masked
-        total_masked_correct += masked_correct
-        total_boards += 1
-        total_boards_correct += int(correct.all().item())
+        inp = torch.from_numpy(board).long().unsqueeze(0).to(device)  # (1,9,9)
+        logits = model(inp)  # (1,9,9,9)
+        probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()  # (9,9,9)
 
-        if i < 3:  # print first 3 examples
-            print(f"\n── Sample {i+1} ──")
-            print("Input   (9=masked):\n", inp.squeeze(0).cpu().numpy() + 1)
-            print("Target:\n", target.cpu().numpy() + 1)
-            print("Pred:\n", pred.cpu().numpy() + 1)
-            print(f"Masked cells correct: {masked_correct}/{n_masked}")
+        # Find the masked cell with the highest max-class probability
+        best_conf, best_r, best_c, best_digit = -1.0, -1, -1, -1
+        for r, c in masked:
+            conf = probs[:, r, c].max()
+            digit = probs[:, r, c].argmax()
+            if conf > best_conf:
+                best_conf, best_r, best_c, best_digit = conf, r, c, digit
 
-    masked_acc = total_masked_correct / max(1, total_masked) * 100
-    full_board_acc = total_boards_correct / total_boards * 100
-    print(f"\n── Results over {total_boards} puzzles ──")
-    print(f"  Masked-cell accuracy : {masked_acc:.2f}%")
-    print(f"  Full-board accuracy  : {full_board_acc:.2f}%")
+        if best_r == -1:  # no progress (shouldn't happen)
+            break
+
+        board[best_r, best_c] = best_digit
+
+    return board
 
 
 def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint")
-    p.add_argument("--samples", type=int, default=20, help="Number of test puzzles")
-    return p.parse_args()
+    parser = argparse.ArgumentParser(description="SudokuSolver inference")
+    parser.add_argument(
+        "--checkpoint", type=str, default="runs/sudoku_cnn_20260509_111124/best.pt"
+    )
+    parser.add_argument("--num_puzzles", type=int, default=50)
+    parser.add_argument(
+        "--num_clues",
+        type=int,
+        default=18,
+        help="Number of given cells (rest are masked)",
+    )
+    parser.add_argument(
+        "--device", type=str, default="cuda:1" if torch.cuda.is_available() else "cpu"
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    device = torch.device(args.device)
+    print(f"Device: {device}")
+    model = load_model(args.checkpoint, device)
+    print(f"Loaded checkpoint: {args.checkpoint}\n")
+
+    correct_single, correct_iter = 0, 0
+    for i in range(args.num_puzzles):
+        puzzle, solution = make_puzzle(args.num_clues)
+        pred_single = solve(model, puzzle, device)
+        pred_iter = solve_iterative(model, puzzle, device)
+        valid_single = is_valid_solution(pred_single)
+        valid_iter = is_valid_solution(pred_iter)
+        if valid_single:
+            correct_single += 1
+        if valid_iter:
+            correct_iter += 1
+
+        print(f"=== Puzzle {i + 1} ===")
+        print_board(puzzle, "Input:")
+        print_board(pred_single, f"Single-pass (valid={valid_single}):")
+        print_board(pred_iter, f"Iterative   (valid={valid_iter}):")
+        print_board(solution, "Ground truth:")
+        print("=" * 40 + "\n")
+
+    print(f"Single-pass accuracy: {correct_single}/{args.num_puzzles}")
+    print(f"Iterative   accuracy: {correct_iter}/{args.num_puzzles}")
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    print(f"Loading checkpoint: {args.checkpoint}")
-    model = load_model(args.checkpoint, device)
-
-    ds = SudokuDataset(num_samples=args.samples)
-    evaluate(model, ds, device)
+    main()
