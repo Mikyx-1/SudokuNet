@@ -43,12 +43,12 @@ class AxisAttention(nn.Module):
         x    : (B, 81, C)
         mask : (81, 81) bool – True where attention is *allowed*
         """
-        # MHA attn_mask convention: additive mask, -inf blocks, 0 allows.
-        attn_mask = torch.zeros(81, 81, device=x.device, dtype=x.dtype)
-        attn_mask[~mask] = float("-inf")
-
-        out, _ = self.attn(x, x, x, attn_mask=attn_mask)
-        return self.norm(x + out)
+        # Pre-norm: normalize before attention for stable gradient flow.
+        # Boolean attn_mask: True = blocked. ~mask inverts the allow-mask.
+        # Using bool avoids float16 overflow when called inside autocast.
+        normed = self.norm(x)
+        out, _ = self.attn(normed, normed, normed, attn_mask=~mask)
+        return x + out
 
 
 class SudokuTransformerBlock(nn.Module):
@@ -91,17 +91,20 @@ class SudokuTransformerBlock(nn.Module):
         col_mask: torch.Tensor,
         box_mask: torch.Tensor,
     ) -> torch.Tensor:
-        # 1. Global attention
-        g, _ = self.global_attn(x, x, x)
-        x = self.global_norm(x + g)
+        # Pre-norm throughout: normalize before each sub-layer, add residual after.
 
-        # 2-4. Constraint-axis attention
+        # 1. Global attention
+        normed = self.global_norm(x)
+        g, _ = self.global_attn(normed, normed, normed)
+        x = x + g
+
+        # 2-4. Constraint-axis attention (pre-norm inside AxisAttention)
         x = self.row_attn(x, row_mask)
         x = self.col_attn(x, col_mask)
         x = self.box_attn(x, box_mask)
 
         # 5. FFN
-        x = self.ffn_norm(x + self.ffn(x))
+        x = x + self.ffn(self.ffn_norm(x))
         return x
 
 
