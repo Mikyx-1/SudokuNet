@@ -18,7 +18,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from config import TrainConfig
@@ -87,13 +87,13 @@ class Trainer:
 
     def _build_dataloaders(self) -> None:
         cfg = self.cfg
-        full_ds = SudokuDataset(cfg.num_samples, cfg.min_mask, cfg.max_mask)
         val_size = max(1, int(0.05 * cfg.num_samples))
-        # Fixed seed so every rank produces the identical train/val split.
-        generator = torch.Generator().manual_seed(42)
-        train_ds, val_ds = random_split(
-            full_ds, [cfg.num_samples - val_size, val_size], generator=generator
-        )
+        train_size = cfg.num_samples - val_size
+
+        # Two independent datasets: train gets curriculum updates, val is fixed.
+        start_mask = cfg.curriculum_start_mask if cfg.curriculum else cfg.max_mask
+        self.train_ds = SudokuDataset(train_size, cfg.min_mask, start_mask)
+        val_ds = SudokuDataset(val_size, cfg.min_mask, cfg.max_mask)
 
         loader_kwargs = dict(
             num_workers=cfg.num_workers,
@@ -103,13 +103,16 @@ class Trainer:
 
         if self.distributed:
             self.train_sampler: Optional[DistributedSampler] = DistributedSampler(
-                train_ds, num_replicas=self.world_size, rank=self.rank, shuffle=True
+                self.train_ds,
+                num_replicas=self.world_size,
+                rank=self.rank,
+                shuffle=True,
             )
             val_sampler = DistributedSampler(
                 val_ds, num_replicas=self.world_size, rank=self.rank, shuffle=False
             )
             self.train_loader = DataLoader(
-                train_ds,
+                self.train_ds,
                 batch_size=cfg.batch_size,
                 sampler=self.train_sampler,
                 **loader_kwargs,
@@ -123,7 +126,7 @@ class Trainer:
         else:
             self.train_sampler = None
             self.train_loader = DataLoader(
-                train_ds, batch_size=cfg.batch_size, shuffle=True, **loader_kwargs
+                self.train_ds, batch_size=cfg.batch_size, shuffle=True, **loader_kwargs
             )
             self.val_loader = DataLoader(
                 val_ds, batch_size=cfg.batch_size * 2, **loader_kwargs
@@ -172,6 +175,16 @@ class Trainer:
             return max(cfg.lr_min / cfg.lr, cosine)
 
         self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+
+    # ── Curriculum ────────────────────────────────────────────────────────────
+
+    def _curriculum_max_mask(self, epoch: int) -> int:
+        cfg = self.cfg
+        start = cfg.curriculum_start_mask
+        end = cfg.max_mask
+        ramp = max(1, int(cfg.num_epochs * cfg.curriculum_ramp_frac))
+        progress = min(epoch / ramp, 1.0)
+        return int(start + progress * (end - start))
 
     # ── Checkpoint I/O ────────────────────────────────────────────────────────
 
@@ -326,6 +339,12 @@ class Trainer:
                 self.train_sampler.set_epoch(
                     epoch
                 )  # ensures different shuffles per epoch
+
+            if self.cfg.curriculum:
+                new_max = self._curriculum_max_mask(epoch)
+                self.train_ds.max_mask = new_max
+                if self.is_main and epoch % self.cfg.log_every == 0:
+                    log.debug("Curriculum max_mask: %d", new_max)
 
             train_stats = self._train_epoch(epoch)
 
