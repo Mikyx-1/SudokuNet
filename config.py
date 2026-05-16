@@ -36,6 +36,11 @@ class TrainConfig:
     label_smoothing: float = 0.1
     use_amp: bool = False
 
+    # ── Curriculum ────────────────────────────────────────────────────────────
+    curriculum: bool = True
+    curriculum_start_mask: int = 20
+    curriculum_ramp_frac: float = 0.4
+
     # ── LR Schedule ───────────────────────────────────────────────────────────
     warmup_epochs: int = 5
     lr_min: float = 1e-6

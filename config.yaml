@@ -17,10 +17,13 @@ training:
   batch_size: 128
   lr: 3.0e-4
   weight_decay: 1.0e-4
-  num_epochs: 200
+  num_epochs: 3000
   grad_clip: 1.0
   label_smoothing: 0.1
   use_amp: true
+  curriculum: true
+  curriculum_start_mask: 20
+  curriculum_ramp_frac: 0.02
 
 schedule:
   warmup_epochs: 5
