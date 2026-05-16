@@ -343,17 +343,16 @@ class Trainer:
             if self.cfg.curriculum:
                 new_max = self._curriculum_max_mask(epoch)
                 self.train_ds.max_mask = new_max
-                if self.is_main and epoch % self.cfg.log_every == 0:
-                    log.debug("Curriculum max_mask: %d", new_max)
 
             train_stats = self._train_epoch(epoch)
 
             if self.is_main:
                 log.info(
-                    "Epoch %4d/%d | loss %.4f | mask_acc %.4f | full_acc %.4f | "
+                    "Epoch %4d/%d | #masked %2d | loss %.4f | mask_acc %.4f | full_acc %.4f | "
                     "lr %.2e | %.1fs",
                     epoch + 1,
                     self.cfg.num_epochs,
+                    self.train_ds.max_mask,
                     train_stats["loss"],
                     train_stats["masked_acc"],
                     train_stats["full_acc"],
