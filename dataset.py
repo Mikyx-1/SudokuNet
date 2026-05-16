@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import random
 from typing import Tuple
 
@@ -81,7 +82,6 @@ def _solve_mrv(board, rows, cols, boxes):
 
 
 class Sudoku:
-
     @staticmethod
     def solve_board_mrv(board: np.ndarray) -> bool:
         rows = np.zeros(9, dtype=np.int64)
@@ -123,7 +123,19 @@ class SudokuDataset(Dataset):
     def __init__(self, num_samples: int, min_mask: int = 1, max_mask: int = 64):
         self.num_samples = num_samples
         self.min_mask = min_mask
-        self.max_mask = max_mask
+        # Shared int so DataLoader worker processes see curriculum updates from
+        # the main process. Plain attribute assignment is invisible to workers
+        # once they've forked (especially with persistent_workers=True), which
+        # would silently freeze the curriculum at its initial value.
+        self._max_mask = mp.Value("i", int(max_mask), lock=False)
+
+    @property
+    def max_mask(self) -> int:
+        return self._max_mask.value
+
+    @max_mask.setter
+    def max_mask(self, value: int) -> None:
+        self._max_mask.value = int(value)
 
     def __len__(self) -> int:
         return self.num_samples
