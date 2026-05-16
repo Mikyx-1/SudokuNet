@@ -136,9 +136,9 @@ class Trainer:
         self.model: nn.Module = SudokuSolver(
             embed_dim=64,
             channels=256,
-            num_res_blocks=4,
-            num_transformer_blocks=8,
-            num_heads=8,
+            num_res_blocks=2,
+            num_transformer_blocks=4,
+            num_heads=4,
             dropout_rate=0.1,
         ).to(self.device)
 
