@@ -163,6 +163,17 @@ def solve_beam(
     return beams[0][0]
 
 
+def solve_classic(puzzle: np.ndarray) -> np.ndarray:
+    """
+    Classic MRV backtracking solver (no model). Wraps `Sudoku.solve_board_mrv`,
+    which expects 1-indexed boards with 0 for empty cells. Converts from the
+    inference encoding (9 = unknown, 0–8 = digits) and back.
+    """
+    board = np.where(puzzle == 9, 0, puzzle + 1).astype(np.int64)
+    Sudoku.solve_board_mrv(board)
+    return board - 1
+
+
 @torch.no_grad()
 def solve_iterative(
     model: SudokuSolver, puzzle: np.ndarray, device: torch.device
@@ -231,13 +242,15 @@ def main():
     print(f"Loaded checkpoint: {args.checkpoint}\n")
 
     # Warmup: first forward pass on CUDA pays cuDNN/kernel init costs that
-    # would otherwise inflate the first puzzle's timing.
+    # would otherwise inflate the first puzzle's timing. Numba also JIT-compiles
+    # the classic solver on first call — fold that into warmup too.
     warm_puzzle, _ = make_puzzle(args.num_clues)
     solve(model, warm_puzzle, device)
     _sync(device)
+    solve_classic(warm_puzzle)
 
-    correct_single, correct_iter, correct_beam = 0, 0, 0
-    time_single, time_iter, time_beam = 0.0, 0.0, 0.0
+    correct_single, correct_iter, correct_beam, correct_classic = 0, 0, 0, 0
+    time_single, time_iter, time_beam, time_classic = 0.0, 0.0, 0.0, 0.0
     for i in range(args.num_puzzles):
         puzzle, solution = make_puzzle(args.num_clues)
 
@@ -259,21 +272,29 @@ def main():
         _sync(device)
         time_beam += time.perf_counter() - t0
 
+        t0 = time.perf_counter()
+        pred_classic = solve_classic(puzzle)
+        time_classic += time.perf_counter() - t0
+
         valid_single = is_valid_solution(pred_single)
         valid_iter = is_valid_solution(pred_iter)
         valid_beam = is_valid_solution(pred_beam)
+        valid_classic = is_valid_solution(pred_classic)
         if valid_single:
             correct_single += 1
         if valid_iter:
             correct_iter += 1
         if valid_beam:
             correct_beam += 1
+        if valid_classic:
+            correct_classic += 1
 
         print(f"=== Puzzle {i + 1} ===")
         print_board(puzzle, "Input:")
         print_board(pred_single, f"Single-pass (valid={valid_single}):")
         print_board(pred_iter, f"Iterative   (valid={valid_iter}):")
         print_board(pred_beam, f"Beam B={args.beam_width} (valid={valid_beam}):")
+        print_board(pred_classic, f"Classic MRV (valid={valid_classic}):")
         print_board(solution, "Ground truth:")
         print("=" * 40 + "\n")
 
@@ -288,6 +309,9 @@ def main():
     )
     print(
         f"{f'Beam B={args.beam_width}':<18} {correct_beam}/{n:<10} {time_beam:7.2f}s   {time_beam / n * 1000:7.1f} ms"
+    )
+    print(
+        f"{'Classic MRV':<18} {correct_classic}/{n:<10} {time_classic:7.2f}s   {time_classic / n * 1000:7.1f} ms"
     )
 
 
