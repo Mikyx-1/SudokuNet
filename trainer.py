@@ -139,7 +139,6 @@ class Trainer:
             num_res_blocks=2,
             num_transformer_blocks=4,
             num_heads=4,
-            dropout_rate=0.1,
         ).to(self.device)
 
         if self.cfg.resume_from:

@@ -31,11 +31,9 @@ class AxisAttention(nn.Module):
     where k≤9, but we keep the standard MHA implementation for simplicity.
     """
 
-    def __init__(self, channels: int, num_heads: int, dropout: float = 0.1):
+    def __init__(self, channels: int, num_heads: int):
         super().__init__()
-        self.attn = nn.MultiheadAttention(
-            channels, num_heads, batch_first=True, dropout=dropout
-        )
+        self.attn = nn.MultiheadAttention(channels, num_heads, batch_first=True)
         self.norm = nn.LayerNorm(channels)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -61,26 +59,20 @@ class SudokuTransformerBlock(nn.Module):
       5. Position-wise FFN
     """
 
-    def __init__(
-        self, channels: int, num_heads: int, ffn_mult: int = 4, dropout: float = 0.1
-    ):
+    def __init__(self, channels: int, num_heads: int, ffn_mult: int = 4):
         super().__init__()
-        self.global_attn = nn.MultiheadAttention(
-            channels, num_heads, batch_first=True, dropout=dropout
-        )
+        self.global_attn = nn.MultiheadAttention(channels, num_heads, batch_first=True)
         self.global_norm = nn.LayerNorm(channels)
 
-        self.row_attn = AxisAttention(channels, num_heads, dropout)
-        self.col_attn = AxisAttention(channels, num_heads, dropout)
-        self.box_attn = AxisAttention(channels, num_heads, dropout)
+        self.row_attn = AxisAttention(channels, num_heads)
+        self.col_attn = AxisAttention(channels, num_heads)
+        self.box_attn = AxisAttention(channels, num_heads)
 
         hidden = channels * ffn_mult
         self.ffn = nn.Sequential(
             nn.Linear(channels, hidden),
             nn.GELU(),
-            nn.Dropout(dropout),
             nn.Linear(hidden, channels),
-            nn.Dropout(dropout),
         )
         self.ffn_norm = nn.LayerNorm(channels)
 
@@ -111,13 +103,12 @@ class SudokuTransformerBlock(nn.Module):
 class ResidualBlock(nn.Module):
     """Lightweight spatial residual block (kept for the CNN front-end)."""
 
-    def __init__(self, channels: int, dropout_rate: float = 0.1):
+    def __init__(self, channels: int):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(channels, channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(channels),
             nn.GELU(),
-            nn.Dropout2d(dropout_rate),
             nn.Conv2d(channels, channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(channels),
         )
@@ -157,7 +148,6 @@ class SudokuSolver(nn.Module):
         num_transformer_blocks: int = 8,
         num_heads: int = 8,
         ffn_mult: int = 4,
-        dropout_rate: float = 0.1,
     ) -> None:
         super().__init__()
 
@@ -181,13 +171,13 @@ class SudokuSolver(nn.Module):
             nn.GELU(),
         )
         self.res_blocks = nn.Sequential(
-            *[ResidualBlock(channels, dropout_rate) for _ in range(num_res_blocks)]
+            *[ResidualBlock(channels) for _ in range(num_res_blocks)]
         )
 
         # ── Transformer trunk ─────────────────────────────────────────────────
         self.transformer_blocks = nn.ModuleList(
             [
-                SudokuTransformerBlock(channels, num_heads, ffn_mult, dropout_rate)
+                SudokuTransformerBlock(channels, num_heads, ffn_mult)
                 for _ in range(num_transformer_blocks)
             ]
         )
@@ -280,7 +270,6 @@ if __name__ == "__main__":
         num_res_blocks=4,
         num_transformer_blocks=8,
         num_heads=8,
-        dropout_rate=0.1,
     ).to(device)
 
     total = sum(p.numel() for p in model.parameters())

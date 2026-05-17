@@ -25,7 +25,6 @@ class TrainConfig:
     channels: int = 256
     num_res_blocks: int = 8
     num_heads: int = 8
-    dropout_rate: float = 0.1
 
     # ── Training ──────────────────────────────────────────────────────────────
     batch_size: int = 128

@@ -11,7 +11,6 @@ model:
   channels: 256
   num_res_blocks: 8
   num_heads: 8
-  dropout_rate: 0.1
 
 training:
   batch_size: 128
@@ -23,7 +22,7 @@ training:
   use_amp: true
   curriculum: true
   curriculum_start_mask: 20
-  curriculum_ramp_frac: 0.02
+  curriculum_ramp_frac: 0.4
 
 schedule:
   warmup_epochs: 5
