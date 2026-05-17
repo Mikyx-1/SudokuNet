@@ -3,13 +3,15 @@ test.py — Load a trained SudokuSolver and run inference on sample puzzles.
 """
 
 import argparse
-from operator import itemgetter
+import time
 
 import numpy as np
 import torch
 
 from dataset import Sudoku
 from model import SudokuSolver
+
+torch.backends.cudnn.benchmark = True
 
 
 def load_model(path: str, device: torch.device) -> SudokuSolver:
@@ -77,81 +79,21 @@ def solve(model: SudokuSolver, puzzle: np.ndarray, device: torch.device) -> np.n
     return out
 
 
-def _allowed_digits(board: np.ndarray, r: int, c: int) -> list:
-    """Digits (0-8) still consistent with the row/col/box of cell (r,c)."""
-    used = set(board[r, :].tolist())
-    used.update(board[:, c].tolist())
-    br, bc = (r // 3) * 3, (c // 3) * 3
-    used.update(board[br : br + 3, bc : bc + 3].ravel().tolist())
-    used.discard(9)  # 9 = unknown, not a real digit
-    return [d for d in range(9) if d not in used]
+def _sync(device: torch.device) -> None:
+    """Block until pending CUDA work finishes so wall-clock timing is honest."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
 
-def _pick_mrv_cell(board: np.ndarray):
+def solve_classic(puzzle: np.ndarray) -> np.ndarray:
     """
-    Most-constrained masked cell (MRV). Returns (r, c, allowed) for the masked
-    cell with the fewest allowed digits, or None if some masked cell has zero
-    allowed digits (dead-end board).
+    Classic MRV backtracking solver (no model). Wraps `Sudoku.solve_board_mrv`,
+    which expects 1-indexed boards with 0 for empty cells. Converts from the
+    inference encoding (9 = unknown, 0–8 = digits) and back.
     """
-    best = None
-    for r in range(9):
-        for c in range(9):
-            if board[r, c] != 9:
-                continue
-            allowed = _allowed_digits(board, r, c)
-            if not allowed:
-                return None
-            if best is None or len(allowed) < len(best[2]):
-                best = (r, c, allowed)
-    return best
-
-
-@torch.no_grad()
-def solve_beam(
-    model: SudokuSolver,
-    puzzle: np.ndarray,
-    device: torch.device,
-    beam_width: int = 32,
-) -> np.ndarray:
-    """
-    Beam search with constraint masking and MRV cell ordering.
-
-    Each beam carries a (partial board, cumulative log-prob). Per step, every
-    active beam picks its most-constrained masked cell and branches on every
-    digit still consistent with that cell's row/col/box. The top `beam_width`
-    candidates by total log-prob survive; completed beams stay in the pool
-    and compete on score. Returns the highest-scoring completed board.
-    """
-    beams = [(puzzle.copy(), 0.0)]
-
-    while True:
-        active = [(b, s) for b, s in beams if (b == 9).any()]
-        complete = [(b, s) for b, s in beams if not (b == 9).any()]
-        if not active:
-            break
-
-        inp = torch.from_numpy(np.stack([b for b, _ in active])).long().to(device)
-        logits = model(inp)  # (B, 9, 9, 9), class dim at 1
-        log_probs = torch.log_softmax(logits, dim=1).cpu().numpy()
-
-        candidates = list(complete)
-        for i, (board, score) in enumerate(active):
-            picked = _pick_mrv_cell(board)
-            if picked is None:
-                continue  # dead-end beam, prune
-            r, c, allowed = picked
-            for d in allowed:
-                new_board = board.copy()
-                new_board[r, c] = d
-                candidates.append((new_board, score + float(log_probs[i, d, r, c])))
-
-        if not candidates:
-            return puzzle.copy()  # every beam died; give up
-
-        candidates.sort(key=itemgetter(1), reverse=True)
-        beams = candidates[:beam_width]
-
-    return beams[0][0]
+    board = np.where(puzzle == 9, 0, puzzle + 1).astype(np.int64)
+    Sudoku.solve_board_mrv(board)
+    return board - 1
 
 
 @torch.no_grad()
@@ -203,12 +145,6 @@ def parse_args():
         help="Number of given cells (rest are masked)",
     )
     parser.add_argument(
-        "--beam_width",
-        type=int,
-        default=32,
-        help="Beam search width for solve_beam",
-    )
-    parser.add_argument(
         "--device", type=str, default="cuda:1" if torch.cuda.is_available() else "cpu"
     )
     return parser.parse_args()
@@ -221,33 +157,65 @@ def main():
     model = load_model(args.checkpoint, device)
     print(f"Loaded checkpoint: {args.checkpoint}\n")
 
-    correct_single, correct_iter, correct_beam = 0, 0, 0
+    # Warmup: first forward pass on CUDA pays cuDNN/kernel init costs that
+    # would otherwise inflate the first puzzle's timing. Numba also JIT-compiles
+    # the classic solver on first call — fold that into warmup too.
+    warm_puzzle, _ = make_puzzle(args.num_clues)
+    solve(model, warm_puzzle, device)
+    _sync(device)
+    solve_classic(warm_puzzle)
+
+    correct_single, correct_iter, correct_classic = 0, 0, 0
+    time_single, time_iter, time_classic = 0.0, 0.0, 0.0
     for i in range(args.num_puzzles):
         puzzle, solution = make_puzzle(args.num_clues)
+
+        _sync(device)
+        t0 = time.perf_counter()
         pred_single = solve(model, puzzle, device)
+        _sync(device)
+        time_single += time.perf_counter() - t0
+
+        _sync(device)
+        t0 = time.perf_counter()
         pred_iter = solve_iterative(model, puzzle, device)
-        pred_beam = solve_beam(model, puzzle, device, beam_width=args.beam_width)
+        _sync(device)
+        time_iter += time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        pred_classic = solve_classic(puzzle)
+        time_classic += time.perf_counter() - t0
+
         valid_single = is_valid_solution(pred_single)
         valid_iter = is_valid_solution(pred_iter)
-        valid_beam = is_valid_solution(pred_beam)
+        valid_classic = is_valid_solution(pred_classic)
         if valid_single:
             correct_single += 1
         if valid_iter:
             correct_iter += 1
-        if valid_beam:
-            correct_beam += 1
+        if valid_classic:
+            correct_classic += 1
 
         print(f"=== Puzzle {i + 1} ===")
         print_board(puzzle, "Input:")
         print_board(pred_single, f"Single-pass (valid={valid_single}):")
         print_board(pred_iter, f"Iterative   (valid={valid_iter}):")
-        print_board(pred_beam, f"Beam B={args.beam_width} (valid={valid_beam}):")
+        print_board(pred_classic, f"Classic MRV (valid={valid_classic}):")
         print_board(solution, "Ground truth:")
         print("=" * 40 + "\n")
 
-    print(f"Single-pass accuracy:  {correct_single}/{args.num_puzzles}")
-    print(f"Iterative   accuracy:  {correct_iter}/{args.num_puzzles}")
-    print(f"Beam B={args.beam_width} accuracy: {correct_beam}/{args.num_puzzles}")
+    n = args.num_puzzles
+    print(f"{'Method':<18} {'Accuracy':<12} {'Total':<10} {'Avg/puzzle'}")
+    print("-" * 55)
+    print(
+        f"{'Single-pass':<18} {correct_single}/{n:<10} {time_single:7.2f}s   {time_single / n * 1000:7.1f} ms"
+    )
+    print(
+        f"{'Iterative':<18} {correct_iter}/{n:<10} {time_iter:7.2f}s   {time_iter / n * 1000:7.1f} ms"
+    )
+    print(
+        f"{'Classic MRV':<18} {correct_classic}/{n:<10} {time_classic:7.2f}s   {time_classic / n * 1000:7.1f} ms"
+    )
 
 
 if __name__ == "__main__":
