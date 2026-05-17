@@ -3,6 +3,7 @@ test.py — Load a trained SudokuSolver and run inference on sample puzzles.
 """
 
 import argparse
+import time
 from operator import itemgetter
 
 import numpy as np
@@ -10,6 +11,8 @@ import torch
 
 from dataset import Sudoku
 from model import SudokuSolver
+
+torch.backends.cudnn.benchmark = True
 
 
 def load_model(path: str, device: torch.device) -> SudokuSolver:
@@ -75,6 +78,12 @@ def solve(model: SudokuSolver, puzzle: np.ndarray, device: torch.device) -> np.n
     out = puzzle.copy()
     out[puzzle == 9] = pred[puzzle == 9]
     return out
+
+
+def _sync(device: torch.device) -> None:
+    """Block until pending CUDA work finishes so wall-clock timing is honest."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
 
 def _allowed_digits(board: np.ndarray, r: int, c: int) -> list:
@@ -221,12 +230,35 @@ def main():
     model = load_model(args.checkpoint, device)
     print(f"Loaded checkpoint: {args.checkpoint}\n")
 
+    # Warmup: first forward pass on CUDA pays cuDNN/kernel init costs that
+    # would otherwise inflate the first puzzle's timing.
+    warm_puzzle, _ = make_puzzle(args.num_clues)
+    solve(model, warm_puzzle, device)
+    _sync(device)
+
     correct_single, correct_iter, correct_beam = 0, 0, 0
+    time_single, time_iter, time_beam = 0.0, 0.0, 0.0
     for i in range(args.num_puzzles):
         puzzle, solution = make_puzzle(args.num_clues)
+
+        _sync(device)
+        t0 = time.perf_counter()
         pred_single = solve(model, puzzle, device)
+        _sync(device)
+        time_single += time.perf_counter() - t0
+
+        _sync(device)
+        t0 = time.perf_counter()
         pred_iter = solve_iterative(model, puzzle, device)
+        _sync(device)
+        time_iter += time.perf_counter() - t0
+
+        _sync(device)
+        t0 = time.perf_counter()
         pred_beam = solve_beam(model, puzzle, device, beam_width=args.beam_width)
+        _sync(device)
+        time_beam += time.perf_counter() - t0
+
         valid_single = is_valid_solution(pred_single)
         valid_iter = is_valid_solution(pred_iter)
         valid_beam = is_valid_solution(pred_beam)
@@ -245,9 +277,18 @@ def main():
         print_board(solution, "Ground truth:")
         print("=" * 40 + "\n")
 
-    print(f"Single-pass accuracy:  {correct_single}/{args.num_puzzles}")
-    print(f"Iterative   accuracy:  {correct_iter}/{args.num_puzzles}")
-    print(f"Beam B={args.beam_width} accuracy: {correct_beam}/{args.num_puzzles}")
+    n = args.num_puzzles
+    print(f"{'Method':<18} {'Accuracy':<12} {'Total':<10} {'Avg/puzzle'}")
+    print("-" * 55)
+    print(
+        f"{'Single-pass':<18} {correct_single}/{n:<10} {time_single:7.2f}s   {time_single / n * 1000:7.1f} ms"
+    )
+    print(
+        f"{'Iterative':<18} {correct_iter}/{n:<10} {time_iter:7.2f}s   {time_iter / n * 1000:7.1f} ms"
+    )
+    print(
+        f"{f'Beam B={args.beam_width}':<18} {correct_beam}/{n:<10} {time_beam:7.2f}s   {time_beam / n * 1000:7.1f} ms"
+    )
 
 
 if __name__ == "__main__":
