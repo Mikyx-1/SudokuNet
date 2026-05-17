@@ -5,6 +5,13 @@ Transformer trained from scratch on puzzles generated on the fly. At inference
 time it can either fill all blanks in a single forward pass or solve
 iteratively (fix the single most-confident blank, re-run, repeat).
 
+## Pretrained weights
+
+The trained checkpoint used for the results below is hosted on Google Drive:
+
+- **[`sudoku_cnn_20260517_163449/last.pt`](https://drive.google.com/drive/folders/1GyYQ5D4laih6tBdw8Vga08TUG_6apMvK)** — download and
+  drop into `runs/sudoku_cnn_20260517_163449/last.pt`.
+
 ## Results
 
 Sweep over clue counts on 1000 fresh puzzles per point with checkpoint
